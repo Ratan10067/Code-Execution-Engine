@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  judge-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: judge-api
+    ports:
+      - "3000:3000"
+    volumes:
+      # Mount Docker socket so API can create sandbox containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Shared temp directory for execution work dirs
+      - /tmp/judge:/tmp/judge
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      - MAX_CONCURRENT=2
+      - DEFAULT_TIME_LIMIT=5
+      - DEFAULT_MEMORY_LIMIT=256
+      - MAX_TIME_LIMIT=10
+      - MAX_MEMORY_LIMIT=512
+      - MAX_CODE_SIZE=65536
+      - SANDBOX_IMAGE=judge-sandbox
+      - TEMP_DIR=/tmp/judge
+      - RATE_LIMIT_WINDOW=60000
+      - RATE_LIMIT_MAX=30
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

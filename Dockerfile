@@ -6,6 +6,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     python3 \
     coreutils \
+    wget \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory

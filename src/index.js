@@ -11,16 +11,19 @@ async function bootstrap() {
   logger.info("  🚀 Code Execution Engine — Starting...");
   logger.info("═══════════════════════════════════════════════");
 
-  // Step 1: Verify Docker is available
-  await verifyDocker();
+  // Step 1: Check execution mode
+  if (config.EXECUTION_MODE === "process") {
+    logger.info("🔧 Running in PROCESS mode (no Docker required)");
+  } else {
+    // Docker mode: verify Docker is available and build sandbox image
+    await verifyDocker();
+    await buildSandboxImage();
+  }
 
-  // Step 2: Build sandbox image if needed
-  await buildSandboxImage();
-
-  // Step 3: Ensure temp directory exists
+  // Step 2: Ensure temp directory exists
   await ensureDir(config.TEMP_DIR);
 
-  // Step 4: Start HTTP server
+  // Step 3: Start HTTP server
   app.listen(config.PORT, "0.0.0.0", () => {
     logger.info("───────────────────────────────────────────────");
     logger.info(`  ✅ Server running on http://0.0.0.0:${config.PORT}`);

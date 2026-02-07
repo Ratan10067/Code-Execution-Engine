@@ -7,6 +7,9 @@ module.exports = {
   PORT: parseInt(process.env.PORT) || 3000,
   NODE_ENV: process.env.NODE_ENV || "development",
 
+  // Execution mode: 'docker' (default) or 'process' (for HF Spaces)
+  EXECUTION_MODE: process.env.EXECUTION_MODE || "docker",
+
   // Execution constraints
   MAX_CONCURRENT: parseInt(process.env.MAX_CONCURRENT) || 2,
   DEFAULT_TIME_LIMIT: parseInt(process.env.DEFAULT_TIME_LIMIT) || 5,

@@ -1,6 +1,6 @@
 FROM node:20-slim
 
-# Install compilers and Python directly in container
+# Install compilers, Python, and required utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
@@ -13,18 +13,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create app directory
 WORKDIR /app
 
+# Create temp directory for code execution
+RUN mkdir -p /tmp/judge && chmod 777 /tmp/judge
+
 # Copy package files and install dependencies
 COPY package*.json ./
 RUN npm ci --production
 
 # Copy source code
 COPY src/ ./src/
-COPY .env* ./
-
-# Create a non-root user for added security
-RUN useradd -m -u 1000 judge && \
-    mkdir -p /tmp/judge && \
-    chown -R judge:judge /tmp/judge /app
 
 # Environment variables for Hugging Face Spaces
 ENV NODE_ENV=production
@@ -42,10 +39,8 @@ ENV RATE_LIMIT_MAX=30
 
 EXPOSE 7860
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:7860/api/health || exit 1
+# Health check using curl (simpler than wget)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:7860/api/health || exit 1
 
-# Note: Running as root for now since compilers need access
-# In production, consider more restricted permissions
 CMD ["node", "src/index.js"]

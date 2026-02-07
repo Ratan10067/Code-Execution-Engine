@@ -1,3 +1,12 @@
+---
+title: Code Execution Engine
+emoji: ⚡
+colorFrom: blue
+colorTo: purple
+sdk: docker
+pinned: false
+---
+
 # Code Execution Engine
 
 A high-performance code execution and judging engine supporting C, C++, and Python. Supports both Docker-based and process-based execution modes.

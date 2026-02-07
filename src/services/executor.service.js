@@ -1,7 +1,9 @@
 // ─── Executor Service ────────────────────────
 // Core engine: creates Docker sandbox, runs code, collects metrics
+// BATCH MODE: compile once, run all test cases in ONE container
 
 const { execFile } = require("child_process");
+const { exec: execCb } = require("child_process");
 const { promisify } = require("util");
 const path = require("path");
 const config = require("../config");
@@ -10,38 +12,53 @@ const {
   writeFile,
   readFile,
   cleanup,
+  ensureDir,
 } = require("../utils/file.util");
 const logger = require("../utils/logger.util");
 
 const execFileAsync = promisify(execFile);
+const execAsync = promisify(execCb);
 
 class ExecutorService {
   /**
-   * Execute code in a Docker sandbox container.
+   * Execute code with a SINGLE input (used by /api/execute)
+   * Wraps batchExecute with 1 test case
+   */
+  async execute({ language, code, input = "", timeLimit, memoryLimit }) {
+    const results = await this.batchExecute({
+      language,
+      code,
+      inputs: [input],
+      timeLimit,
+      memoryLimit,
+    });
+    return results[0];
+  }
+
+  /**
+   * Execute code against MULTIPLE inputs in ONE Docker container.
+   * This is the core method — compile once, run N times.
    *
    * Flow:
-   *  1. Create temp directory with code + input files
-   *  2. Spin up Docker container with resource limits
-   *  3. Container compiles (C/C++) and runs code via run.sh
-   *  4. Read output, stderr, and metadata from mounted volume
-   *  5. Cleanup temp directory
-   *  6. Return structured result
+   *  1. Create temp dir with code + all input files
+   *  2. ONE Docker container compiles + runs all test cases
+   *  3. Read all results from mounted volume
+   *  4. Cleanup
    *
    * @param {Object} params
    * @param {string} params.language - c | cpp | python
    * @param {string} params.code - Source code
-   * @param {string} params.input - Stdin input
-   * @param {number} params.timeLimit - Time limit in seconds
-   * @param {number} params.memoryLimit - Memory limit in MB
-   * @returns {Object} Execution result with verdict, output, time, memory
+   * @param {string[]} params.inputs - Array of stdin inputs
+   * @param {number} params.timeLimit - Time limit per test case (seconds)
+   * @param {number} params.memoryLimit - Memory limit (MB)
+   * @returns {Object[]} Array of execution results
    */
-  async execute({ language, code, input = "", timeLimit, memoryLimit }) {
+  async batchExecute({ language, code, inputs = [], timeLimit, memoryLimit }) {
     const langConfig = config.LANGUAGES[language];
     if (!langConfig) {
       throw new Error(`Unsupported language: ${language}`);
     }
 
-    // Clamp limits
     timeLimit = Math.min(
       timeLimit || config.DEFAULT_TIME_LIMIT,
       config.MAX_TIME_LIMIT,
@@ -51,83 +68,89 @@ class ExecutorService {
       config.MAX_MEMORY_LIMIT,
     );
 
-    // Create isolated working directory
+    const numCases = inputs.length;
     const workDir = await createWorkDir();
     const codeDir = path.join(workDir, "code");
+    const tcDir = path.join(workDir, "testcases");
+    const resDir = path.join(workDir, "results");
 
     try {
-      // Write source code and input to temp directory
-      await Promise.all([
+      // Create directories
+      await Promise.all([ensureDir(tcDir), ensureDir(resDir)]);
+
+      // Write code file + all input files in parallel
+      const writeOps = [
         writeFile(path.join(codeDir, langConfig.fileName), code),
-        writeFile(path.join(workDir, "input.txt"), input || ""),
-        writeFile(path.join(workDir, "output.txt"), ""),
-        writeFile(path.join(workDir, "stderr.txt"), ""),
-        writeFile(path.join(workDir, "meta.txt"), ""),
-      ]);
+      ];
+      for (let i = 0; i < numCases; i++) {
+        writeOps.push(
+          writeFile(path.join(tcDir, `${i + 1}.in`), inputs[i] || ""),
+        );
+      }
+      await Promise.all(writeOps);
 
-      // Make the work directory and all files writable by the container
-      const { exec: execCb } = require("child_process");
-      const { promisify: pfy } = require("util");
-      await pfy(execCb)(`chmod -R 777 ${workDir}`);
+      // Make everything writable by container
+      await execAsync(`chmod -R 777 ${workDir}`);
 
-      // ─── Run in Docker Sandbox ───
+      // ─── Run ONE Docker container for ALL test cases ───
       const startTime = process.hrtime.bigint();
       const dockerResult = await this._runDocker(
         workDir,
         language,
         timeLimit,
         memoryLimit,
+        numCases,
       );
       const wallTimeNs = process.hrtime.bigint() - startTime;
       const wallTimeMs = Number(wallTimeNs / 1_000_000n);
 
-      // ─── Read Results ───
-      const [output, stderr, metaRaw] = await Promise.all([
-        readFile(path.join(workDir, "output.txt")),
-        readFile(path.join(workDir, "stderr.txt")),
-        readFile(path.join(workDir, "meta.txt")),
-      ]);
+      logger.info(
+        `🐳 Container finished: ${numCases} test cases in ${wallTimeMs}ms`,
+      );
 
-      // ─── Parse Metadata ───
-      logger.info(`📄 meta.txt raw: [${metaRaw.trim()}]`);
-      logger.info(`📄 output.txt length: ${output.length}`);
-      logger.info(`📄 stderr.txt: [${stderr.trim()}]`);
-      logger.info(`📄 docker exitCode: ${dockerResult.exitCode}`);
-
-      const meta = this._parseMeta(metaRaw);
-
-      // Handle Docker OOM kill (container killed, no meta written)
-      if (dockerResult.oomKilled && !meta.verdict) {
-        meta.verdict = "MLE";
+      // ─── Read ALL results in parallel ───
+      const readOps = [];
+      for (let i = 0; i < numCases; i++) {
+        const idx = i + 1;
+        readOps.push(
+          Promise.all([
+            readFile(path.join(resDir, `${idx}.out`)),
+            readFile(path.join(resDir, `${idx}.err`)),
+            readFile(path.join(resDir, `${idx}.meta`)),
+          ]),
+        );
       }
+      const allResults = await Promise.all(readOps);
 
-      // Handle case where container died before writing meta
-      if (!meta.verdict) {
-        if (dockerResult.exitCode === 137) {
-          meta.verdict = "MLE";
-        } else if (dockerResult.exitCode !== 0) {
-          meta.verdict = "RE";
-        } else {
-          meta.verdict = "IE";
+      // ─── Parse each result ───
+      const results = allResults.map(([output, stderr, metaRaw], i) => {
+        const meta = this._parseMeta(metaRaw);
+
+        if (!meta.verdict) {
+          if (dockerResult.oomKilled) meta.verdict = "MLE";
+          else if (dockerResult.exitCode === 137) meta.verdict = "MLE";
+          else if (dockerResult.exitCode !== 0) meta.verdict = "RE";
+          else meta.verdict = "IE";
         }
-      }
 
-      // ─── Build Response ───
-      return {
-        verdict: meta.verdict,
-        output: this._truncate(output, 10000),
-        error: this._truncate(stderr, 5000),
-        executionTime: meta.time || wallTimeMs,
-        memoryUsed: meta.memory || 0,
-        exitCode: meta.exitCode ?? dockerResult.exitCode,
-        wallTime: wallTimeMs,
-        language,
-        timeLimit,
-        memoryLimit,
-      };
+        return {
+          verdict: meta.verdict,
+          output: this._truncate(output, 10000),
+          error: this._truncate(stderr, 5000),
+          executionTime: meta.time || 0,
+          memoryUsed: meta.memory || 0,
+          exitCode: meta.exitCode ?? dockerResult.exitCode,
+          wallTime: wallTimeMs,
+          language,
+          timeLimit,
+          memoryLimit,
+        };
+      });
+
+      return results;
     } catch (err) {
       logger.error(`Execution failed: ${err.message}`);
-      return {
+      return inputs.map(() => ({
         verdict: "IE",
         output: "",
         error: `Internal Error: ${err.message}`,
@@ -138,65 +161,47 @@ class ExecutorService {
         language,
         timeLimit,
         memoryLimit,
-      };
+      }));
     } finally {
-      // Always cleanup temp directory
       await cleanup(workDir);
     }
   }
 
   /**
-   * Launch Docker container with security restrictions and resource limits
+   * Launch Docker container — batch mode
+   * run.sh <language> <time_limit> <num_test_cases>
    */
-  async _runDocker(workDir, language, timeLimit, memoryLimit) {
+  async _runDocker(workDir, language, timeLimit, memoryLimit, numCases) {
+    // Total timeout = time_limit * numCases + 20s overhead (compile + Docker)
+    const totalTimeout = timeLimit * numCases + 20;
+
     const args = [
       "run",
       "--rm",
-
-      // ─── Network isolation ───
       "--network=none",
-
-      // ─── Memory limits ───
       `--memory=${memoryLimit}m`,
-      `--memory-swap=${memoryLimit}m`, // No swap allowed
-
-      // ─── CPU limits ───
+      `--memory-swap=${memoryLimit}m`,
       "--cpus=1",
-
-      // ─── Process limits ───
       "--pids-limit=64",
-
-      // ─── Security hardening ───
       "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
-
-      // ─── File size limit (10MB) ───
       "--ulimit",
       "fsize=10485760:10485760",
-
-      // ─── Open file limit ───
       "--ulimit",
       "nofile=64:64",
-
-      // ─── Volume mount ───
       "-v",
       `${workDir}:/sandbox`,
-
-      // ─── Sandbox image and args ───
       config.SANDBOX_IMAGE,
       language,
       String(timeLimit),
+      String(numCases),
     ];
-
-    logger.debug(`🐳 Docker args: ${args.join(" ")}`);
 
     try {
       const { stdout, stderr } = await execFileAsync("docker", args, {
-        // Give extra time for Docker overhead + compilation
-        timeout: (timeLimit + 20) * 1000,
+        timeout: totalTimeout * 1000,
         maxBuffer: 10 * 1024 * 1024,
       });
-
       return { exitCode: 0, stdout, stderr, oomKilled: false };
     } catch (err) {
       const exitCode = err.code || 1;
@@ -207,14 +212,11 @@ class ExecutorService {
         return {
           exitCode: 124,
           stdout: "",
-          stderr: "Execution timed out (Docker overhead)",
+          stderr: "Timed out",
           oomKilled: false,
         };
       }
 
-      logger.debug(
-        `🐳 Docker exited with code ${exitCode}${oomKilled ? " (OOM)" : ""}`,
-      );
       return {
         exitCode,
         stdout: err.stdout || "",
@@ -225,49 +227,28 @@ class ExecutorService {
   }
 
   /**
-   * Parse the metadata file written by run.sh
-   * Format: key=value per line
+   * Parse key=value metadata from run.sh
    */
   _parseMeta(raw) {
     const meta = {};
     if (!raw || !raw.trim()) return meta;
-
-    const lines = raw.trim().split("\n");
-    for (const line of lines) {
-      const eqIndex = line.indexOf("=");
-      if (eqIndex === -1) continue;
-
-      const key = line.substring(0, eqIndex).trim();
-      const value = line.substring(eqIndex + 1).trim();
-
-      switch (key) {
-        case "verdict":
-          meta.verdict = value;
-          break;
-        case "time":
-          meta.time = parseInt(value) || 0;
-          break;
-        case "memory":
-          meta.memory = parseInt(value) || 0;
-          break;
-        case "exitCode":
-          meta.exitCode = parseInt(value) || 0;
-          break;
-      }
+    for (const line of raw.trim().split("\n")) {
+      const eq = line.indexOf("=");
+      if (eq === -1) continue;
+      const key = line.substring(0, eq).trim();
+      const val = line.substring(eq + 1).trim();
+      if (key === "verdict") meta.verdict = val;
+      else if (key === "time") meta.time = parseInt(val) || 0;
+      else if (key === "memory") meta.memory = parseInt(val) || 0;
+      else if (key === "exitCode") meta.exitCode = parseInt(val) || 0;
     }
-
     return meta;
   }
 
-  /**
-   * Truncate string to prevent huge responses
-   */
   _truncate(str, maxLen) {
     if (!str) return "";
     if (str.length <= maxLen) return str;
-    return (
-      str.substring(0, maxLen) + `\n... (truncated, ${str.length} total chars)`
-    );
+    return str.substring(0, maxLen) + `\n... (truncated)`;
   }
 }
 

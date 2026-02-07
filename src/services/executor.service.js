@@ -65,6 +65,11 @@ class ExecutorService {
         writeFile(path.join(workDir, "meta.txt"), ""),
       ]);
 
+      // Make the work directory and all files writable by the container
+      const { exec: execCb } = require("child_process");
+      const { promisify: pfy } = require("util");
+      await pfy(execCb)(`chmod -R 777 ${workDir}`);
+
       // ─── Run in Docker Sandbox ───
       const startTime = process.hrtime.bigint();
       const dockerResult = await this._runDocker(
@@ -84,6 +89,11 @@ class ExecutorService {
       ]);
 
       // ─── Parse Metadata ───
+      logger.info(`📄 meta.txt raw: [${metaRaw.trim()}]`);
+      logger.info(`📄 output.txt length: ${output.length}`);
+      logger.info(`📄 stderr.txt: [${stderr.trim()}]`);
+      logger.info(`📄 docker exitCode: ${dockerResult.exitCode}`);
+
       const meta = this._parseMeta(metaRaw);
 
       // Handle Docker OOM kill (container killed, no meta written)

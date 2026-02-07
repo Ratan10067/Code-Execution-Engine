@@ -8,7 +8,6 @@ RUN apk add --no-cache \
     python3 \
     bash \
     coreutils \
-    time \
     && rm -rf /var/cache/apk/*
 
 # ─── Copy runner script ───

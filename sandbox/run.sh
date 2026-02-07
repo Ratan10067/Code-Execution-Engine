@@ -17,7 +17,6 @@ INPUT="$WORKDIR/input.txt"
 OUTPUT="$WORKDIR/output.txt"
 STDERR_FILE="$WORKDIR/stderr.txt"
 META="$WORKDIR/meta.txt"
-TIME_FILE="/tmp/time_output"
 
 # ─── Initialize output files ───
 > "$OUTPUT"
@@ -75,15 +74,26 @@ fi
 # Record start time (nanoseconds via GNU coreutils)
 START_NS=$(/usr/bin/date +%s%N 2>/dev/null || echo $(($(date +%s) * 1000000000)))
 
-# Run with:
-#   - GNU time (-v) for peak memory measurement → writes to TIME_FILE
-#   - timeout for TLE enforcement
-#   - Program stderr → STDERR_FILE
-#   - Program stdout → OUTPUT
-/usr/bin/time -v -o "$TIME_FILE" \
-    timeout "$TIME_LIMIT" \
-    sh -c "$EXEC_CMD < \"$INPUT\" > \"$OUTPUT\" 2>\"$STDERR_FILE\""
+# Run the program in background so we can monitor /proc for memory
+timeout "$TIME_LIMIT" \
+    sh -c "$EXEC_CMD < \"$INPUT\" > \"$OUTPUT\" 2>\"$STDERR_FILE\"" &
 
+CHILD_PID=$!
+PEAK_MEMORY=0
+
+# Monitor memory usage via /proc while process is alive
+while kill -0 $CHILD_PID 2>/dev/null; do
+    if [ -f "/proc/$CHILD_PID/status" ]; then
+        CURRENT_MEM=$(grep VmRSS /proc/$CHILD_PID/status 2>/dev/null | awk '{print $2}')
+        if [ -n "$CURRENT_MEM" ] && [ "$CURRENT_MEM" -gt "$PEAK_MEMORY" ] 2>/dev/null; then
+            PEAK_MEMORY=$CURRENT_MEM
+        fi
+    fi
+    sleep 0.05
+done
+
+# Get exit code of the background process
+wait $CHILD_PID
 RUN_EXIT=$?
 
 # Record end time
@@ -96,9 +106,7 @@ EXEC_TIME_MS=$(( (END_NS - START_NS) / 1000000 ))
 #  PHASE 3: PARSE RESULTS
 # ═══════════════════════════════════════════════
 
-# Extract peak memory usage (KB) from GNU time
-PEAK_MEMORY=$(grep "Maximum resident set size" "$TIME_FILE" 2>/dev/null | awk '{print $NF}')
-[ -z "$PEAK_MEMORY" ] && PEAK_MEMORY=0
+# PEAK_MEMORY is already set from /proc monitoring (in KB)
 
 # ═══════════════════════════════════════════════
 #  PHASE 4: DETERMINE VERDICT

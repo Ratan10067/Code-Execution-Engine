@@ -24,7 +24,7 @@ const executeSchema = Joi.object({
       "string.empty": "Code cannot be empty",
       "any.required": "Code is required",
     }),
-  input: Joi.string().max(config.MAX_CODE_SIZE).allow("").default(""),
+  input: Joi.string().max(config.MAX_INPUT_SIZE).allow("").default(""),
   timeLimit: Joi.number()
     .integer()
     .min(1)
@@ -45,8 +45,8 @@ const executeSchema = Joi.object({
 
 // ─── Schema: Test case ───
 const testCaseSchema = Joi.object({
-  input: Joi.string().max(config.MAX_CODE_SIZE).allow("").required(),
-  expectedOutput: Joi.string().max(config.MAX_CODE_SIZE).required(),
+  input: Joi.string().max(config.MAX_INPUT_SIZE).allow("").required(),
+  expectedOutput: Joi.string().max(config.MAX_INPUT_SIZE).required(),
 });
 
 // ─── Schema: POST /api/judge ───

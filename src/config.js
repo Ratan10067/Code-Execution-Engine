@@ -17,6 +17,7 @@ module.exports = {
   MAX_TIME_LIMIT: parseInt(process.env.MAX_TIME_LIMIT) || 10,
   MAX_MEMORY_LIMIT: parseInt(process.env.MAX_MEMORY_LIMIT) || 512,
   MAX_CODE_SIZE: parseInt(process.env.MAX_CODE_SIZE) || 65536,
+  MAX_INPUT_SIZE: parseInt(process.env.MAX_INPUT_SIZE) || 524288, // 512KB for test case inputs
 
   // Docker
   SANDBOX_IMAGE: process.env.SANDBOX_IMAGE || "judge-sandbox",
